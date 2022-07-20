@@ -1,0 +1,289 @@
+# ########################
+# Vegan analysis
+# Maria Scheel
+# thermokarst soil microbiome: Scheel et. al. 2022
+# https://doi.org/10.3389/fmicb.2022.787146
+# #######################
+
+#load all necessary libraries
+library(tidyverse)
+library(vegan)
+library(corrplot)
+library(VIM)
+library(dplyr)
+
+
+###############################
+# First, I am setting my path and uploading and converting the data to fit the functions
+setwd()
+
+# Loading my response data: 16S amplicons counts in 10 different depths over 2 year (=18 sites/observations)
+# Note: I used relative counts per sample as input, as delivered after the QIIME2 workflow described in this repository, too.
+ampli <- as.data.frame.list(read_tsv("16S_ASV.txt"))
+ampli.2 <- ampli[,-1]
+rownames(ampli.2) <- ampli[,1]
+ampli<- ampli.2
+
+
+#Loading environmental data, explaining the 18 sites with 4 continuous numerical and 4 categorical variables (the latter resulted in 19 dummy variables with depth and 9 without)
+ampli.env <- as.data.frame.list(read_tsv("16S_env.txt"))
+ampli.env1 <- ampli.env[,-1]
+rownames(ampli.env1) <- ampli.env[,1]
+ampli.env.original <- ampli.env1 #we keep a copy of the original version
+#as a test remove depth as descriptor(multicollinearity)
+ampli.env <- ampli.env1# remove depth, as it created a lot of collinearity and was just added as covariable
+
+dummy_age <- as.data.frame(model.matrix( ~ age - 1, data=ampli.env )) # 10 dummies, actually only needed as covariable
+dummy_horizon <- as.data.frame(model.matrix( ~ horizon - 1, data=ampli.env )) # 4 dummies
+dummy_layer <- as.data.frame(model.matrix( ~ layer - 1, data=ampli.env ))  # 3 dummies
+dummy_year <- as.data.frame(model.matrix(~ year -1, data=ampli.env))
+
+#add these to the dataset
+ampli.env <- ampli.env.original %>% select(SOM, H2O, pH, depth) %>% cbind(.,dummy_age)  %>% cbind(.,dummy_horizon) %>% cbind(.,dummy_layer) %>% cbind(.,dummy_year)
+ampli.env$SOM <- as.numeric(as.character(ampli.env$SOM)) #make numeric
+ampli.env$depth <- as.numeric(as.character(ampli.env$depth)) #make numeric
+ampli.env$H20 <- as.numeric(as.character(ampli.env$H2O)) #make numeric
+ampli.env$pH <- as.numeric(as.character(ampli.env$pH)) #make numeric
+
+ampli.env2 <- ampli.env[,-15] # remove last column
+
+#make column names shorter
+ampli.env <- ampli.env2 %>% rename(t1 = yeart1, t2 = yeart2, HO = horizonHO, HM = horizonHM, AL = layerAL, TZ = layerTZ, 
+                               PF = layerPF, AM = ageAM, AY = ageAY, AO = ageAO)
+
+#########################
+# Testing quality of data
+# check for missing values: Cleveland plot to inspect data
+dotchart(as.matrix(ampli), main="Cleveland plot", xlab="Observed value")  # it does look like 3 outliers
+
+# Find missing values
+(mvo_miss<-which(is.na(ampli), arr.ind=TRUE)) # none
+
+# test for collinearity (as occurred before)
+# VIF for CCA (>10 collinear and creates distortion)
+ampli.cca <- cca(ampli ~ ., ampli.env) # could not remove depth here yet
+vif.cca <- vif.cca(ampli.cca)
+vif.cca
+
+#####################
+# alternative: look at pairwise correlations among the variables.
+ampli.env_cor<-cor(ampli.env, method = "kendall")
+corrplot(ampli.env_cor, type = "upper", order = "hclust", tl.col = "black", tl.srt = 45)
+
+###########################
+# Exploring the data with unconstrained ordinations
+
+# Cluster analysis
+# Hierarchic clustering can be perfomed using standard R function hclust
+# In community ecology, most popular are single linkage a.k.a. nearest neighbour,
+# complete linkage a.k.a. furthest neighbour
+dis <- vegdist(ampli)
+clus <- hclust(dis, "single")
+plot(clus)
+
+cluc <- hclust(dis, "complete")
+plot(cluc)
+
+clua <- hclust(dis, "average") # usually preferred, balancing 2 extremes
+plot(clua)
+
+range(dis) #all dendrograms based on range of dissimilarities & check for best fit
+cor(dis, cophenetic(clus))
+cor(dis, cophenetic(cluc))
+cor(dis, cophenetic(clua))
+
+#testing if these clusters fit some of my env data
+plot(clua)
+rect.hclust(clua, 4) # draws boxes around what would be the clusters
+
+grp <- cutree(clua, 4) # to use clusters downstream
+boxplot(horizon ~ grp, data=ampli.env, notch = TRUE) # visually test clusters with env parameters
+
+# creating a CA to check how clusters fit sites
+ord <- cca(ampli)
+plot(ord, display = "sites")
+ordihull(ord, grp, lty = 4, col = "red") # depict the computed clusters in ordination
+
+###########################
+# PCAs
+# I need to scale my data, as age has values of 26500 and hence impacts the ordination:
+env.pca2 <- rda(ampli.env, scale = FALSE) #vegan uses the same function for PCA and RDA, just depends on if it is constrained or not.
+biplot(env.pca2)
+
+# Then make a PCA, with scaling of the data
+env.pca <- rda(ampli.env, scale = TRUE) #vegan uses the same function for PCA and RDA, just depends on if it is constrained or not.
+biplot(env.pca) #plot the results using the default plot scaling which is "species"
+env.pca
+
+summary(eigenvals(env.pca)) #see variance explained
+
+# both by default scaled on species
+par(mfrow = c(1,2))
+biplot(env.pca, main = "PCA with scaling of data")
+biplot(env.pca2, main = "PCA without scaling of data")
+par(mfrow = c(1,1))
+# scaling much needed
+
+#######################################################
+# PCOAS
+# generate the four distance matrices
+ampli.bray.distance.matrix<-vegdist(ampli,method="bray")
+# ampli.jaccard.distance.matrix<-vegdist(ampli,method="jaccard", binary=TRUE)
+ampli.euclidean.distance.matrix<-vegdist(ampli,method="euclidean")
+# ampli.mahalanobis.distance.matrix<-vegdist(ampli,method="mahalanobis")
+
+
+# run an MDS using cmdscale() for each of the four distance matrices
+ampli.bray.location<-cmdscale(ampli.bray.distance.matrix) 
+# ampli.jaccard.location<-cmdscale(ampli.jaccard.distance.matrix)
+ampli.euclidean.location<-cmdscale(ampli.euclidean.distance.matrix)
+# ampli.mahalanobis.location<-cmdscale(ampli.mahalanobis.distance.matrix)
+
+# comparing all, bray curtis delivers best seperation of sites
+par(mfrow = c(1,2))
+plot(ampli.bray.location, xlab="PCoA 1", ylab="PCoA 2")
+title(main="PCoA on Bray Curtis distances of ampli sites")
+text(ampli.bray.location,labels=row.names(ampli.bray.location),pos=2)
+
+plot(ampli.euclidean.location, xlab="PCoA 1", ylab="PCoA 2")
+title(main="PCoA on Euclidean distances of ampli sites")
+text(ampli.euclidean.location,labels=row.names(ampli.euclidean.location),pos=2)
+par(mfrow = c(1,1))
+
+##########################################
+# NMDS
+# with the defaults and 2 dimensions, what is the stress?
+ampli.NMDS.bray.2<-metaMDS(ampli,k=2) # run 20 stress 0.0630106 
+ampli.NMDS.bray.9<-metaMDS(ampli,k=9) # run 20 stress 0.004099687
+
+# what happens when Euclidean distances are used?
+ampli.NMDS.euclidean.9<-metaMDS(ampli,k=9, distance = "euclidean") #run 20 stress 0.3632735 --> worse goodness of fit
+ampli.NMDS.euclidean.2<-metaMDS(ampli,k=2, distance = "euclidean") #run 20 stress 0.3632735 --> worse goodness of fit
+
+# plot some results
+par(mfrow = c(2,3))
+ordiplot(ampli.NMDS.bray.2, type="text", main="NMDS from Bray Curtis distance, 2 Dimensions, stress: 0.07519573 ") # better seperation
+ordiplot(ampli.NMDS.bray.9, type="text", main="NMDS from Bray Curtis distance, 9 Dimensions, stress: 0.00336786 ") # good stress
+ordiplot(ampli.NMDS.euclidean.2, type="text", main="NMDS from Euclidean distance, 2 Dimensions, stress: 0.06821274 ")
+stressplot(ampli.NMDS.bray.2)
+stressplot(ampli.NMDS.bray.9)
+stressplot(ampli.NMDS.euclidean.2)
+par(mfrow = c(1,1))
+# BC better seperation of species
+
+# ENVIRONMENTAL PARAMETER FITTING
+ef <- envfit(ampli.NMDS.bray.9, ampli.env, permu = 999) #nmds results of env. data
+ef
+
+plot(ampli.NMDS.bray.9, display = "species", type="text", main="NMDS from BC, envfit k= 9")
+plot(ef, p.max = 0.05) # only significant ones get depicted
+
+##################
+# interpreting hypotheses
+####################
+# testing effect of horizon, proceed similar for all categorical metadata
+ampli.ccaHOR <- cca(ampli ~ horizon , ampli.env.original)
+summary(ampli.ccaHOR)
+# Permutation test on CCA
+MCperm <- permutest(ampli.ccaHOR, permutations=999)
+MCperm
+
+# numeric metadata
+ampli.ccaH2O <- cca(ampli ~ H2O , ampli.env)
+summary(ampli.ccaH2O)
+MCperm <- permutest(ampli.ccaH2O, permutations=999)
+MCperm
+
+#########################
+# partial ordinations
+
+#This partials out the effect of A1 and Moisture before analysing the effects of horizon
+depth.cca <- cca(ampli ~ . + Condition(t1+t2), data=ampli.env)
+summary(depth.cca)
+
+#permutation test
+permutest(depth.cca, permutations=999)
+
+ampli.cca <- cca(ampli ~ ., ampli.env)
+# Plot the ordination
+par(mfrow =c(1,2))
+ordiplot(ampli.cca, type = "text", main = "CCA ~ all")
+ordiplot(depth.cca, type = "text", main = "CCA ~ all with depth partialled out")
+par(mfrow =c(1,1))
+# ordihull(age.cca,groups = ampli.env.original$age,draw = "polygon",col = "grey90", label = T)
+
+
+##############################
+## variance partitioning to create venn diagrams
+PF <- ampli.env[,c("PF")]
+M2 <- ampli.env[,c("M2")]
+age <- ampli.env[,("age")]
+TZ <- ampli.env[,c("TZ")]
+time <- ampli.env[,c("t2")]
+# examine the explanatory variable of each class of variables.
+varp <- varpart(ampli, PF,  TZ, age, time)
+varp
+
+plot (varp, digits = 2, Xnames = c('permafrost',  'thaw','soil age', 'change after 1 year'), bg = c('red', 'blue', 'green', 'yellow'))
+
+
+###########################
+# Anosim
+# statical analysis of trends indicated by ordination and variance partitioning
+
+# Start with a CA with year as environmental factor and hulls around the different year types
+ampli.ca<-cca(ampli)
+par(mfrow =c(1,3))
+fit.mgm<-envfit(ampli.ca ~ horizon, ampli.env.original, perm = 0)
+plot(ampli.ca, type = "p", scaling = "symmetric")
+with(ampli.env.original, ordispider(ampli.ca, horizon, scaling = "symmetric", col="skyblue"))
+with(ampli.env.original, ordihull(ampli.ca, horizon, scaling = "symmetric",label = TRUE))
+fit.mgm<-envfit(ampli.ca ~ layer, ampli.env.original, perm = 0)
+plot(ampli.ca, type = "p", scaling = "symmetric")
+with(ampli.env.original, ordispider(ampli.ca, layer, scaling = "symmetric", col="skyblue"))
+with(ampli.env.original, ordihull(ampli.ca, layer, scaling = "symmetric",label = TRUE))
+fit.mgm<-envfit(ampli.ca ~ year, ampli.env.original, perm = 0)
+plot(ampli.ca, type = "p", scaling = "symmetric")
+with(ampli.env.original, ordispider(ampli.ca, year, scaling = "symmetric", col="skyblue"))
+with(ampli.env.original, ordihull(ampli.ca, year, scaling = "symmetric",label = TRUE))
+par(mfrow =c(1,1))
+
+ampli.dist <- vegdist(ampli, method = "bray") #create distance matrix based on Bray-Curtis method
+ampli.ano.layer <- anosim(ampli.dist, ampli.env.original$layer) #Comparing groupings based on year
+summary(ampli.ano.layer) #year and layernot significant, but year
+ampli.ano.horizon <- anosim(ampli.dist, ampli.env.original$horizon) #Comparing groupings based on year
+summary(ampli.ano.horizon) #year and layernot significant, but year
+ampli.ano.year <- anosim(ampli.dist, ampli.env.original$year) #Comparing groupings based on year
+summary(ampli.ano.year) #year and layernot significant, but year
+
+par(mfrow =c(1,3))
+plot(ampli.ano.layer, xlab = "Layer")
+plot(ampli.ano.horizon, xlab = "Horizon")
+plot(ampli.ano.year, xlab = "Year")
+par(mfrow =c(1,1))
+
+
+##################Indicator species
+library(labdsv)
+library(tibble)
+# This analysis merely partitions the relative abundance of counts per species in the categories assigned, resulting in 100% abundance in each category.
+# Final files best visualised with barplots.
+iva <- indval(ampli, ampli.env.original$year) #this time we don't need dummy variables for horizon
+iva.df <- as.data.frame(iva$indval)
+#arrange in descending order to find best indicator species, change BF to other horizon types as needed
+data<-arrange(rownames_to_column(iva.df), desc(t1)) # species most abundant in M2
+data
+write_tsv(data,"indval_horizon_t1_new.tsv")
+
+
+iva <- indval(ampli, ampli.env.original$layer) #this time we don't need dummy variables for horizon
+iva.df <- as.data.frame(iva$indval)
+#arrange in descending order to find best indicator species, change BF to other horizon types as needed
+data.2<-arrange(rownames_to_column(iva.df), desc(PF)) # species most abundant in PF
+data.2
+write_tsv(data.2,"indval_layer_PF_new.tsv")
+
+data.3<-arrange(rownames_to_column(iva.df), desc(TZ))
+data.3
+write_tsv(data.3,"indval_layer_TZ_new.tsv")
+
